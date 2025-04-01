@@ -2,14 +2,20 @@ from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from groq import Groq
 import os
-import json
+from dotenv import load_dotenv
+load_dotenv()
 
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app, resources={r"/chat": {"origins": "*"}})
+# Enable CORS for all origins and methods on all routes
+CORS(app, origins="*", allow_headers=["Content-Type"])
 
 # Initialize Groq client
-client = Groq(api_key="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")
+api_key = os.getenv("GROQ_API_KEY")  # Fetch API key
+if not api_key:
+    print("WARNING: GROQ_API_KEY environment variable not set")
+
+client = Groq(api_key=api_key) if api_key else None
 
 # System prompt for organ donation chatbot
 SYSTEM_PROMPT = """
@@ -48,30 +54,62 @@ def generate_ai_response(user_input, history):
         str: Streaming response chunks
     """
     try:
+        if not client:
+            # If no API key is set, generate a fallback response
+            yield "I'm here to help with organ donation questions, but I'm currently in offline mode. Please ensure the API key is properly configured. In the meantime, you can visit https://notto.abdm.gov.in/ to learn more about organ donation."
+            return
+
+        # Debug output to help diagnose issues
+        print(f"Processing user input: {user_input}")
+        print(f"History length: {len(history)}")
+        
         # Prepare messages for API call
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        messages.extend(history)
+        
+        # Add history messages (convert 'system' role to 'assistant' if needed)
+        for msg in history:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            
+            if not role or not content:
+                continue
+                
+            if role == "system":
+                role = "assistant"  # Normalize roles
+            
+            messages.append({"role": role, "content": content})
+        
+        # Add current user message
         messages.append({"role": "user", "content": user_input})
 
+        # Print out messages being sent to API for debugging
+        print(f"Sending {len(messages)} messages to API")
+        
         # Create streaming completion
         completion = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=messages,
-            temperature=1,
-            max_completion_tokens=512,
+            temperature=0.7,
+            max_tokens=512,  # Fixed parameter name from max_completion_tokens to max_tokens
             top_p=1,
             stream=True,
-            stop=None,
         )
 
         # Stream response chunks
+        empty_response = True
         for chunk in completion:
-            content = chunk.choices[0].delta.content or ""
+            content = chunk.choices[0].delta.content
             if content:
+                empty_response = False
                 yield content
+        
+        # If we got no content at all
+        if empty_response:
+            yield "I'm sorry, I couldn't generate a response. Please try asking something else about organ donation."
 
     except Exception as e:
-        yield f"Sorry, I couldn't respond. Error: {str(e)}. Try again!"
+        print(f"Error generating response: {str(e)}")
+        yield f"Sorry, I couldn't respond. Error: {str(e)}. Please try again later."
 
 @app.route('/chat', methods=['POST'])
 def chat():
@@ -81,22 +119,35 @@ def chat():
     Returns:
         Response: Streaming response from AI
     """
-    # Parse incoming JSON data
-    data = request.json
-    user_input = data.get('message')
-    history = data.get('history', [])
-    
-    # Validate input
-    if not user_input:
-        return jsonify({'error': 'No message provided'}), 400
-    
-    # Create generator function for streaming
-    def generate():
-        for chunk in generate_ai_response(user_input, history):
-            yield chunk
-    
-    # Return streaming response
-    return Response(generate(), mimetype='text/plain')
+    try:
+        # Parse incoming JSON data
+        data = request.get_json(silent=True)
+        if not data:
+            print("No JSON data received")
+            return jsonify({'error': 'No data provided'}), 400
+            
+        user_input = data.get('message')
+        history = data.get('history', [])
+        
+        # Validate input
+        if not user_input:
+            print("No message provided in request")
+            return jsonify({'error': 'No message provided'}), 400
+        
+        # Print received data for debugging
+        print(f"Received message: {user_input}")
+        print(f"History entries: {len(history)}")
+        
+        # Create generator function for streaming
+        def generate():
+            for chunk in generate_ai_response(user_input, history):
+                yield chunk
+        
+        # Return streaming response
+        return Response(generate(), mimetype='text/plain')
+    except Exception as e:
+        print(f"Error in chat endpoint: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 # Health check endpoint
 @app.route('/health', methods=['GET'])
@@ -113,9 +164,44 @@ def health_check():
         'version': '1.0.0'
     })
 
+# Add a test endpoint to verify API key is working
+@app.route('/test-api', methods=['GET'])
+def test_api():
+    """
+    Test the Groq API connection
+    
+    Returns:
+        dict: API connection status
+    """
+    if not client:
+        return jsonify({
+            'status': 'error',
+            'message': 'GROQ_API_KEY not configured'
+        }), 500
+    
+    try:
+        # Simple test call to Groq API
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": "Hello"}],
+            max_tokens=5,  # Fixed parameter name from max_completion_tokens to max_tokens
+        )
+        return jsonify({
+            'status': 'success',
+            'message': 'API connection working'
+        })
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'API error: {str(e)}'
+        }), 500
+
 if __name__ == '__main__':
     # Get port from environment or use default
     port = int(os.getenv("PORT", 5000))
+    
+    print(f"Starting server on port {port}")
+    print(f"API key configured: {bool(api_key)}")
     
     # Run the Flask app
     app.run(
