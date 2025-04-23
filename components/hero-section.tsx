@@ -113,7 +113,7 @@ Keep responses concise, engaging, and focused on inspiring action.`;
         model: "llama3-70b-8192",
         messages: apiMessages,
         temperature: 1,
-        max_tokens: 512,
+        max_tokens: 256,
         top_p: 1,
         stream: true,
       });
